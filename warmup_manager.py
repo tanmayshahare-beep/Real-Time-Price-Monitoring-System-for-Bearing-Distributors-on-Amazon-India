@@ -191,7 +191,7 @@ class BehavioralScheduler:
             self.timing.between_requests()
 
         # Occasional hesitation
-        if self.timing.hesitation():
+        if self.timing.should_hesitate():
             self.timing.human_pause(1, 3)
 
     def delay_between_products(self):

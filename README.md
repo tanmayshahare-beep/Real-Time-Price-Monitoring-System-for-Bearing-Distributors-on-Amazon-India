@@ -21,13 +21,57 @@ A Scrapy-based price monitor with **human-like browsing patterns** to avoid dete
 4. Start MongoDB locally or use a cloud instance.
 
 ## Running
+- **CLI (recommended):** `python cli.py interactive` — full interactive menu
 - **Scraper only:** `scrapy crawl amazon -a query="SKF bearing 6205"`
-- **Enhanced scheduler (recommended):** `python orchestrator.py --mode scheduled`
+- **CLI scrape:** `python cli.py scrape` or `python cli.py scrape "custom query"`
+- **CLI monitor:** `python cli.py monitor` or `python cli.py monitor --interval 4`
+- **Enhanced scheduler:** `python orchestrator.py --mode scheduled`
 - **Single session:** `python orchestrator.py --mode once`
 - **Direct ASIN checks:** `python orchestrator.py --mode direct-asin`
 - **Legacy scheduler:** `python run_spider.py`
 - **Dashboard:** `streamlit run dashboard/app.py`
-- **Manual analysis:** `python -m analysis.analyze <ASIN>`
+- **Manual analysis:** `python cli.py analyze <ASIN>` or `python -m analysis.analyze <ASIN>`
+
+## CLI Commands
+
+The CLI (`python cli.py`) is the primary control interface:
+
+```bash
+# Scraping
+python cli.py scrape                          # Scrape default query
+python cli.py scrape "SKF 6204 bearing"       # Custom query
+python cli.py scrape --decoy                  # Include decoy queries
+python cli.py monitor                         # Continuous monitoring
+python cli.py monitor --interval 4            # Every 4 hours
+
+# Analysis
+python cli.py analyze B09XYZ1234              # AI analysis
+
+# Status & Reports
+python cli.py status                          # Session status
+python cli.py report                          # Export report
+python cli.py report -o my_report.txt         # Custom filename
+
+# Logs
+python cli.py logs                            # Recent activity
+python cli.py logs --errors                   # Errors only
+python cli.py logs --prices                   # Price changes
+python cli.py logs --search "B09XYZ"          # Search logs
+python cli.py logs --type SCRAPE              # Filter by type
+python cli.py logs --scraper                  # Scraper log
+
+# Configuration
+python cli.py config --show                   # Full config
+python cli.py config --list-queries           # List queries/ASINs
+python cli.py config --add-query "NSK 6206"   # Add target query
+python cli.py config --add-decoy "FAG 6205"   # Add decoy query
+python cli.py config --add-asin B09XYZ1234    # Add monitored ASIN
+python cli.py config --set-interval 4         # Set interval
+python cli.py config --set-jitter 20          # Set jitter
+
+# Interactive
+python cli.py interactive                     # Full menu interface
+```
 
 ## Monitoring
 - **Log viewer:** `python log_viewer.py` (interactive menu)

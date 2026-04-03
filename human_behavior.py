@@ -117,7 +117,7 @@ class HumanTiming:
         return delays
 
     @staticmethod
-    def random hesitation() -> bool:
+    def should_hesitate(self) -> bool:
         """
         30% chance of adding an extra pause (simulates human hesitation).
         Use before making a request to add unpredictability.
