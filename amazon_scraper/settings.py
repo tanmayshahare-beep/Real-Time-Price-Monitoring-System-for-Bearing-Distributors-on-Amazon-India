@@ -20,9 +20,13 @@ RETRY_HTTP_CODES = [500, 502, 503, 504, 403, 429, 408]
 
 DOWNLOADER_MIDDLEWARES = {
     'amazon_scraper.middlewares.RotatingProxyMiddleware': 350,
+    'amazon_scraper.middlewares.HumanTimingMiddleware': 375,
     'amazon_scraper.middlewares.CustomRetryMiddleware': 400,
     'scrapy.downloadermiddlewares.httpproxy.HttpProxyMiddleware': 450,
 }
+
+# Human-like timing
+HUMAN_TIMING_ENABLED = True
 
 ITEM_PIPELINES = {
     'amazon_scraper.pipelines.MongoPipeline': 300,

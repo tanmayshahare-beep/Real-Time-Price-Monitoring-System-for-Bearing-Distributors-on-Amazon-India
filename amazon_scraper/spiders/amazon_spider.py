@@ -3,10 +3,29 @@ from scrapy.http import HtmlResponse
 from amazon_scraper.items import ProductItem
 import re
 import json
+import time
+import random
+import math
+
 
 class AmazonSpider(scrapy.Spider):
     name = 'amazon'
     allowed_domains = ['amazon.in']
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._last_request_time = 0
+        self._products_scraped = 0
+
+    def _human_delay(self, min_sec=2.0, max_sec=8.0):
+        """Apply human-like delay between requests."""
+        delay = random.lognormvariate(math.log((min_sec + max_sec) / 2), 0.5)
+        delay = max(min_sec, min(delay, max_sec))
+        # 30% chance of hesitation
+        if random.random() < 0.3:
+            delay += random.uniform(1, 3)
+        time.sleep(delay)
+        return delay
 
     def start_requests(self):
         # You can pass search queries via command line: scrapy crawl amazon -a query="SKF bearing 6205"
@@ -21,6 +40,9 @@ class AmazonSpider(scrapy.Spider):
             self.logger.warning(f"Blocked on search page. Status: {response.status}")
             return
 
+        # Human-like pause after page load (reading results)
+        self._human_delay(3, 10)
+
         # Extract ASINs from data-component-id or links
         product_links = response.css('a.a-link-normal.s-no-outline::attr(href)').getall()
         for link in product_links:
@@ -29,6 +51,8 @@ class AmazonSpider(scrapy.Spider):
         # Pagination
         next_page = response.css('a.s-pagination-next::attr(href)').get()
         if next_page:
+            # Human-like pause before clicking next
+            self._human_delay(2, 5)
             yield response.follow(next_page, callback=self.parse_search)
 
     def parse_product(self, response):
@@ -36,6 +60,9 @@ class AmazonSpider(scrapy.Spider):
         if response.status in [403, 429]:
             self.logger.warning(f"Blocked on product page: {response.url}")
             return
+
+        # Human-like reading time on product page
+        self._human_delay(8, 25)
 
         asin_match = re.search(r'/dp/([A-Z0-9]{10})', response.url)
         asin = asin_match.group(1) if asin_match else None
@@ -61,6 +88,9 @@ class AmazonSpider(scrapy.Spider):
                 default_seller = text.replace('Sold by', '').strip()
                 break
 
+        # Human-like pause before checking offers
+        self._human_delay(5, 15)
+
         # Go to the "See All Offers" page to get full seller list
         offers_url = f"https://www.amazon.in/gp/offer-listing/{asin}"
         yield scrapy.Request(
@@ -74,6 +104,9 @@ class AmazonSpider(scrapy.Spider):
         if response.status in [403, 429]:
             self.logger.warning(f"Blocked on offers page: {response.url}")
             return
+
+        # Human-like reading time on offers page
+        self._human_delay(15, 45)
 
         asin = response.meta['asin']
         title = response.meta['title']
@@ -109,8 +142,8 @@ class AmazonSpider(scrapy.Spider):
                 'shipping': shipping
             })
 
-        # Also capture FBA status (if available)
-        # For simplicity, we assume first few rows may have "Fulfilled by Amazon"
+        self._products_scraped += 1
+        self.logger.info(f"Scraped ASIN {asin}: {title[:50] if title else 'Unknown'} - ₹{default_price}")
 
         item = ProductItem()
         item['asin'] = asin
