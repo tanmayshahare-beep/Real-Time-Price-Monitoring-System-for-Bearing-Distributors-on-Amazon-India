@@ -36,6 +36,7 @@ class C:
     BLUE = '\033[34m'
     MAGENTA = '\033[35m'
     CYAN = '\033[36m'
+    WHITE = '\033[37m'
     BRIGHT_RED = '\033[91m'
     BRIGHT_GREEN = '\033[92m'
     BRIGHT_YELLOW = '\033[93m'
