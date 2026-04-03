@@ -131,6 +131,14 @@ def show_main_menu():
         print(f"    {C.BOLD}15{C.RESET}. Change Scrape Interval")
         print()
 
+        print(f"  {C.BOLD}{C.BRIGHT_RED}CONTROL{C.RESET}")
+        running = _count_running_processes()
+        if running > 0:
+            print(f"    {C.BOLD}16{C.RESET}. {C.BRIGHT_RED}Kill Switch{C.RESET} ({C.BRIGHT_RED}{running} process(es) running{C.RESET})")
+        else:
+            print(f"    {C.BOLD}16{C.RESET}. Kill Switch ({C.GREEN}all clear{C.RESET})")
+        print()
+
         print(f"    {C.BOLD}0{C.RESET}. Exit")
         print()
 
@@ -170,6 +178,8 @@ def show_main_menu():
             screen_manage_queries()
         elif choice == '15':
             screen_change_interval()
+        elif choice == '16':
+            screen_killswitch()
 
 
 # ==================== Screen: Scrape ====================
@@ -670,6 +680,159 @@ def screen_change_interval():
             print(f"  {C.BRIGHT_RED}Invalid number{C.RESET}")
 
     wait()
+
+
+# ==================== Screen: Kill Switch ====================
+
+def _count_running_processes():
+    """Count running scrape-related processes"""
+    try:
+        if os.name == 'nt':
+            result = subprocess.run(
+                ['tasklist', '/FI', 'IMAGENAME eq python.exe', '/NH'],
+                capture_output=True, text=True, timeout=10
+            )
+            lines = [l for l in result.stdout.strip().split('\n') if l.strip()]
+            return len(lines)
+        else:
+            result = subprocess.run(
+                ['pgrep', '-c', '-f', 'scrapy'],
+                capture_output=True, text=True, timeout=10
+            )
+            return int(result.stdout.strip()) if result.stdout.strip().isdigit() else 0
+    except Exception:
+        return 0
+
+
+def _list_scrape_processes():
+    """List running scrape processes with PIDs"""
+    processes = []
+    try:
+        if os.name == 'nt':
+            result = subprocess.run(
+                ['wmic', 'process', 'where', "name='python.exe'", 'get', 'ProcessId,CommandLine', '/format:list'],
+                capture_output=True, text=True, timeout=10
+            )
+            for block in result.stdout.split('\n\n'):
+                pid = ''
+                cmdline = ''
+                for line in block.strip().split('\n'):
+                    if line.startswith('ProcessId='):
+                        pid = line.split('=', 1)[1].strip()
+                    elif line.startswith('CommandLine='):
+                        cmdline = line.split('=', 1)[1].strip()
+
+                if pid and ('scrapy' in cmdline.lower() or 'amazon' in cmdline.lower() or 'orchestrator' in cmdline.lower() or 'cli.py' in cmdline.lower()):
+                    processes.append((pid, cmdline))
+        else:
+            result = subprocess.run(
+                ['ps', 'aux'],
+                capture_output=True, text=True, timeout=10
+            )
+            for line in result.stdout.split('\n'):
+                if any(kw in line.lower() for kw in ['scrapy', 'orchestrator', 'amazon']):
+                    parts = line.split()
+                    if len(parts) > 1:
+                        processes.append((parts[1], ' '.join(parts[10:])))
+    except Exception:
+        pass
+    return processes
+
+
+def screen_killswitch():
+    """Kill switch screen - shows running processes and lets you kill them"""
+    while True:
+        clear()
+        print(f"{C.BOLD}{'Kill Switch':^60}")
+        print(f"{C.DIM}{'─'*60}{C.RESET}\n")
+
+        processes = _list_scrape_processes()
+        count = _count_running_processes()
+
+        if not processes and count == 0:
+            print(f"  {C.BRIGHT_GREEN}✓{C.RESET} No scrape processes running.")
+            print()
+            wait()
+            return
+
+        print(f"  {C.BRIGHT_RED}{len(processes) or count} process(es) found:{C.RESET}\n")
+
+        for i, (pid, cmdline) in enumerate(processes, 1):
+            # Truncate long command lines
+            if len(cmdline) > 55:
+                cmdline = cmdline[:52] + '...'
+            print(f"  {C.BOLD}{i}.{C.RESET} PID: {C.BRIGHT_RED}{pid:<8}{C.RESET} {C.DIM}{cmdline}{C.RESET}")
+
+        if not processes:
+            print(f"  {C.DIM}(Processes detected but details unavailable){C.RESET}")
+            print()
+
+        print()
+        print(f"  {C.BOLD}1{C.RESET}. Kill {C.BRIGHT_RED}all{C.RESET} scrape processes")
+        if processes:
+            print(f"  {C.BOLD}2{C.RESET}. Kill specific process (by number)")
+        print(f"  {C.BOLD}0{C.RESET}. Back")
+        print()
+
+        choice = input(f"  {C.BRIGHT_CYAN}Select{C.RESET}: ").strip()
+
+        if choice == '0':
+            break
+        elif choice == '1':
+            if processes:
+                for pid, _ in processes:
+                    _kill_process(pid)
+            else:
+                # Kill all python processes related to scraper
+                _kill_all_python_scrapers()
+            print(f"  {C.BRIGHT_GREEN}✓{C.RESET} All scrape processes killed.")
+            wait()
+            break
+        elif choice == '2' and processes:
+            sel = input(f"  Process number: ").strip()
+            try:
+                idx = int(sel) - 1
+                if 0 <= idx < len(processes):
+                    pid, cmdline = processes[idx]
+                    print(f"  Killing PID {C.BRIGHT_RED}{pid}{C.RESET}...")
+                    _kill_process(pid)
+                    print(f"  {C.BRIGHT_GREEN}✓{C.RESET} Process killed.")
+                    wait()
+            except ValueError:
+                pass
+
+
+def _kill_process(pid):
+    """Kill a process by PID"""
+    try:
+        if os.name == 'nt':
+            subprocess.run(['taskkill', '/F', '/PID', str(pid)],
+                         capture_output=True, timeout=5)
+        else:
+            subprocess.run(['kill', '-9', str(pid)],
+                         capture_output=True, timeout=5)
+    except Exception:
+        pass
+
+
+def _kill_all_python_scrapers():
+    """Kill all python processes with scrapy/monitor keywords"""
+    try:
+        if os.name == 'nt':
+            # Kill scrapy processes
+            subprocess.run(
+                ['wmic', 'process', 'where',
+                 "name='python.exe' and (CommandLine like '%scrapy%' or CommandLine like '%orchestrator%')",
+                 'delete'],
+                capture_output=True, timeout=10
+            )
+        else:
+            subprocess.run(
+                ['pkill', '-9', '-f', 'scrapy'],
+                capture_output=True, timeout=5
+            )
+    except Exception:
+        pass
 
 
 # ==================== Helpers ====================
