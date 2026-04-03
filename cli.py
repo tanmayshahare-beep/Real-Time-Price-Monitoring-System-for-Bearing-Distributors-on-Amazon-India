@@ -1,11 +1,10 @@
 #!/usr/bin/env python
 """
-CLI for Amazon Price Monitor - Interactive menu-driven interface.
-When opened, shows a dashboard with numbered options to choose from.
+CLI for Amazon Price Monitor - Arrow-key navigable interface.
+Uses raw keyboard input for smooth navigation with ↑↓ arrows and Enter.
 
 Usage:
     python cli.py              Open interactive menu (default)
-    python cli.py --quick      Show quick-help for direct commands
 """
 import os
 import subprocess
@@ -19,7 +18,6 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from config import Config
 from human_behavior import HumanTiming
-from warmup_manager import ScrapePatternRandomizer, BehavioralScheduler, DirectASINChecker
 from stats import stats_tracker
 from logger import activity_logger
 from log_viewer import LogViewer
@@ -47,30 +45,200 @@ class C:
     BRIGHT_WHITE = '\033[97m'
 
 
-def clear():
-    os.system('cls' if os.name == 'nt' else 'clear')
+# ==================== Keyboard Input ====================
+
+class KeyInput:
+    """Cross-platform raw keyboard input"""
+
+    KEY_UP = 'UP'
+    KEY_DOWN = 'DOWN'
+    KEY_ENTER = 'ENTER'
+    KEY_ESC = 'ESC'
+    KEY_BACKSPACE = 'BACKSPACE'
+    KEY_SPACE = 'SPACE'
+
+    @staticmethod
+    def get_key():
+        """
+        Get a single keypress. Returns:
+        'UP', 'DOWN', 'ENTER', 'ESC', 'BACKSPACE', 'SPACE', or the character typed.
+        """
+        if os.name == 'nt':
+            return KeyInput._get_key_windows()
+        else:
+            return KeyInput._get_key_unix()
+
+    @staticmethod
+    def _get_key_windows():
+        import msvcrt
+        ch = msvcrt.getch()
+
+        # Arrow keys send as two bytes: 0xE0 or 0x00 + scan code
+        if ch in (b'\xe0', b'\x00'):
+            ch2 = msvcrt.getch()
+            if ch2 == b'H': return KeyInput.KEY_UP
+            if ch2 == b'P': return KeyInput.KEY_DOWN
+            if ch2 == b'K': return KeyInput.KEY_LEFT
+            if ch2 == b'M': return KeyInput.KEY_RIGHT
+            return None
+
+        if ch == b'\r' or ch == b'\n':
+            return KeyInput.KEY_ENTER
+        if ch == b'\x1b':
+            return KeyInput.KEY_ESC
+        if ch == b'\x08' or ch == b'\x7f':
+            return KeyInput.KEY_BACKSPACE
+        if ch == b' ':
+            return KeyInput.KEY_SPACE
+
+        try:
+            return ch.decode('utf-8', errors='ignore')
+        except Exception:
+            return None
+
+    @staticmethod
+    def _get_key_unix():
+        import tty
+        import termios
+        import select
+
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            # Check if data is available
+            if not select.select([sys.stdin], [], [], 0.1)[0]:
+                return None
+
+            ch = sys.stdin.read(1)
+
+            if ch == '\x1b':
+                # Could be arrow key escape sequence
+                if select.select([sys.stdin], [], [], 0.01)[0]:
+                    ch2 = sys.stdin.read(1)
+                    if ch2 == '[':
+                        if select.select([sys.stdin], [], [], 0.01)[0]:
+                            ch3 = sys.stdin.read(1)
+                            if ch3 == 'A': return KeyInput.KEY_UP
+                            if ch3 == 'B': return KeyInput.KEY_DOWN
+                            if ch3 == 'C': return KeyInput.KEY_RIGHT
+                            if ch3 == 'D': return KeyInput.KEY_LEFT
+                return KeyInput.KEY_ESC
+
+            if ch == '\r' or ch == '\n':
+                return KeyInput.KEY_ENTER
+            if ch == '\x7f' or ch == '\x08':
+                return KeyInput.KEY_BACKSPACE
+            if ch == ' ':
+                return KeyInput.KEY_SPACE
+            return ch
+        except Exception:
+            return None
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
 
 
-def wait(prompt="Press Enter to continue..."):
-    try:
-        input(f"\n  {C.DIM}{prompt}{C.RESET}")
-    except (EOFError, KeyboardInterrupt):
-        pass
+# ==================== Menu System ====================
+
+class MenuItem:
+    """A single menu item"""
+    def __init__(self, label, action=None, color=None, dim=False, separator=False):
+        self.label = label
+        self.action = action  # None = section header or separator
+        self.color = color
+        self.dim = dim
+        self.separator = separator
+
+    def render(self, selected, cursor_char):
+        if self.separator:
+            return f"  {self.label}"
+
+        if self.action is not None:
+            # Selectable item
+            if selected:
+                bg = '\033[44m'  # Blue background
+                return f"{cursor_char} {bg}{C.BOLD} {self.label} {C.RESET}"
+            else:
+                prefix = f"  {cursor_char} "
+                color = self.color if self.color else C.WHITE
+                return f"{prefix}{color}{self.label}{C.RESET}"
+        else:
+            # Section header
+            color = self.color if self.color else C.WHITE
+            if self.dim:
+                return f"  {cursor_char} {C.DIM}{self.label}{C.RESET}"
+            return f"  {cursor_char} {C.BOLD}{color}{self.label}{C.RESET}"
 
 
-# ==================== Screen: Main Menu ====================
+def render_menu(title, items, selected_index, cursor_char="▸"):
+    """Render a complete menu with cursor highlighting"""
+    clear()
 
-def draw_header():
+    # Title
     print(f"{C.BRIGHT_CYAN}{'═'*60}{C.RESET}")
-    print(f"{C.BOLD}     Amazon Price Monitor - Control Panel{C.RESET}")
-    print(f"{C.DIM}     Real-Time Price Monitoring for Amazon India{C.RESET}")
+    print(f"{C.BOLD}     {title}{C.RESET}")
     now = datetime.now().strftime('%A, %d %B %Y  •  %H:%M:%S')
     print(f"{C.DIM}     {now}{C.RESET}")
     print(f"{C.BRIGHT_CYAN}{'═'*60}{C.RESET}")
+    print()
 
+    # Items
+    for i, item in enumerate(items):
+        print(item.render(i == selected_index, cursor_char))
+
+    print()
+    print(f"  {C.DIM}↑↓ navigate  •  Enter select  •  Esc back{C.RESET}")
+
+
+def run_menu(title, items):
+    """
+    Run a navigable menu. Returns the action of the selected item, or None if escaped.
+
+    Args:
+        title: Menu title string
+        items: List of MenuItem objects
+
+    Returns:
+        The action value of the selected item, or None
+    """
+    selected = 0
+
+    # Find first selectable item
+    selectable = [i for i, item in enumerate(items) if item.action is not None and not item.separator]
+    if selectable:
+        selected = selectable[0]
+
+    while True:
+        render_menu(title, items, selected)
+
+        key = KeyInput.get_key()
+
+        if key == KeyInput.KEY_UP:
+            # Move to previous selectable item
+            idx = selectable.index(selected) if selected in selectable else -1
+            if idx > 0:
+                selected = selectable[idx - 1]
+            else:
+                selected = selectable[-1]
+
+        elif key == KeyInput.KEY_DOWN:
+            # Move to next selectable item
+            idx = selectable.index(selected) if selected in selectable else -1
+            if idx < len(selectable) - 1:
+                selected = selectable[idx + 1]
+            else:
+                selected = selectable[0]
+
+        elif key == KeyInput.KEY_ENTER:
+            return items[selected].action
+
+        elif key == KeyInput.KEY_ESC:
+            return None
+
+
+# ==================== Header & Status ====================
 
 def draw_status_strip():
-    """One-line status summary at the top"""
     config = Config()
     tracker = stats_tracker
     summary = tracker.get_session_summary()
@@ -94,91 +262,116 @@ def draw_status_strip():
     print()
 
 
+# ==================== Screen: Main Menu ====================
+
+def build_main_menu_items():
+    items = []
+
+    # Scraping
+    items.append(MenuItem("SCRAPING", color=C.BRIGHT_CYAN))
+    items.append(MenuItem("Run Scrape (default query)", action="scrape_default"))
+    items.append(MenuItem("Run Scrape (custom query)", action="scrape_custom"))
+    items.append(MenuItem("Run Scrape with decoy queries", action="scrape_decoy"))
+    items.append(MenuItem("Start Continuous Monitoring", action="monitor"))
+
+    items.append(MenuItem("", separator=True))
+
+    # Analysis
+    items.append(MenuItem("ANALYSIS", color=C.BRIGHT_MAGENTA))
+    items.append(MenuItem("Run AI Price Analysis", action="analyze"))
+
+    items.append(MenuItem("", separator=True))
+
+    # Status & Reports
+    items.append(MenuItem("STATUS & REPORTS", color=C.BRIGHT_GREEN))
+    items.append(MenuItem("View Session Status", action="status"))
+    items.append(MenuItem("View Price Alerts", action="price_alerts"))
+    items.append(MenuItem("Export Session Report", action="report"))
+
+    items.append(MenuItem("", separator=True))
+
+    # Logs
+    items.append(MenuItem("LOGS", color=C.BRIGHT_YELLOW))
+    items.append(MenuItem("View Activity Log", action="activity_log"))
+    items.append(MenuItem("View Errors Only", action="errors"))
+    items.append(MenuItem("Search Logs", action="search_logs"))
+    items.append(MenuItem("View Scraper Log", action="scraper_log"))
+
+    items.append(MenuItem("", separator=True))
+
+    # Configuration
+    items.append(MenuItem("CONFIGURATION", color=C.BRIGHT_BLUE))
+    items.append(MenuItem("Show Configuration", action="config_show"))
+    items.append(MenuItem("Manage Queries & ASINs", action="manage_queries"))
+    items.append(MenuItem("Change Scrape Interval", action="change_interval"))
+
+    items.append(MenuItem("", separator=True))
+
+    # Control
+    running = _count_running_processes()
+    items.append(MenuItem("CONTROL", color=C.BRIGHT_RED))
+    if running > 0:
+        items.append(MenuItem(f"Kill Switch ({running} process(es) running)",
+                              action="killswitch", color=C.BRIGHT_RED))
+    else:
+        items.append(MenuItem("Kill Switch (all clear)", action="killswitch"))
+
+    items.append(MenuItem("", separator=True))
+    items.append(MenuItem("Exit", action="exit"))
+
+    return items
+
+
 def show_main_menu():
     while True:
         clear()
-        draw_header()
+        print(f"{C.BRIGHT_CYAN}{'═'*60}{C.RESET}")
+        print(f"{C.BOLD}     Amazon Price Monitor - Control Panel{C.RESET}")
+        print(f"{C.DIM}     Real-Time Price Monitoring for Amazon India{C.RESET}")
+        now = datetime.now().strftime('%A, %d %B %Y  •  %H:%M:%S')
+        print(f"{C.DIM}     {now}{C.RESET}")
+        print(f"{C.BRIGHT_CYAN}{'═'*60}{C.RESET}")
         print()
         draw_status_strip()
 
-        print(f"  {C.BOLD}{C.BRIGHT_CYAN}SCRAPING{C.RESET}")
-        print(f"    {C.BOLD}1{C.RESET}. Run Scrape (default query)")
-        print(f"    {C.BOLD}2{C.RESET}. Run Scrape (custom query)")
-        print(f"    {C.BOLD}3{C.RESET}. Run Scrape with decoy queries")
-        print(f"    {C.BOLD}4{C.RESET}. Start Continuous Monitoring")
-        print()
+        items = build_main_menu_items()
+        action = run_menu("Amazon Price Monitor - Control Panel", items)
 
-        print(f"  {C.BOLD}{C.BRIGHT_MAGENTA}ANALYSIS{C.RESET}")
-        print(f"    {C.BOLD}5{C.RESET}. Run AI Price Analysis")
-        print()
-
-        print(f"  {C.BOLD}{C.BRIGHT_GREEN}STATUS & REPORTS{C.RESET}")
-        print(f"    {C.BOLD}6{C.RESET}. View Session Status")
-        print(f"    {C.BOLD}7{C.RESET}. View Price Alerts")
-        print(f"    {C.BOLD}8{C.RESET}. Export Session Report")
-        print()
-
-        print(f"  {C.BOLD}{C.BRIGHT_YELLOW}LOGS{C.RESET}")
-        print(f"    {C.BOLD}9{C.RESET}. View Activity Log")
-        print(f"    {C.BOLD}10{C.RESET}. View Errors Only")
-        print(f"    {C.BOLD}11{C.RESET}. Search Logs")
-        print(f"    {C.BOLD}12{C.RESET}. View Scraper Log")
-        print()
-
-        print(f"  {C.BOLD}{C.BRIGHT_BLUE}CONFIGURATION{C.RESET}")
-        print(f"    {C.BOLD}13{C.RESET}. Show Configuration")
-        print(f"    {C.BOLD}14{C.RESET}. Manage Queries & ASINs")
-        print(f"    {C.BOLD}15{C.RESET}. Change Scrape Interval")
-        print()
-
-        print(f"  {C.BOLD}{C.BRIGHT_RED}CONTROL{C.RESET}")
-        running = _count_running_processes()
-        if running > 0:
-            print(f"    {C.BOLD}16{C.RESET}. {C.BRIGHT_RED}Kill Switch{C.RESET} ({C.BRIGHT_RED}{running} process(es) running{C.RESET})")
-        else:
-            print(f"    {C.BOLD}16{C.RESET}. Kill Switch ({C.GREEN}all clear{C.RESET})")
-        print()
-
-        print(f"    {C.BOLD}0{C.RESET}. Exit")
-        print()
-
-        choice = input(f"  {C.BRIGHT_CYAN}Select option{C.RESET}: ").strip()
-
-        if choice == '0':
+        if action == "exit":
             clear()
             print(f"\n  {C.DIM}Goodbye! 👋{C.RESET}\n")
             break
-        elif choice == '1':
+        elif action == "scrape_default":
             screen_scrape()
-        elif choice == '2':
+        elif action == "scrape_custom":
             screen_scrape_custom()
-        elif choice == '3':
+        elif action == "scrape_decoy":
             screen_scrape_with_decoy()
-        elif choice == '4':
+        elif action == "monitor":
             screen_monitor()
-        elif choice == '5':
+        elif action == "analyze":
             screen_analyze()
-        elif choice == '6':
+        elif action == "status":
             screen_status()
-        elif choice == '7':
+        elif action == "price_alerts":
             screen_price_alerts()
-        elif choice == '8':
+        elif action == "report":
             screen_report()
-        elif choice == '9':
+        elif action == "activity_log":
             screen_activity_log()
-        elif choice == '10':
+        elif action == "errors":
             screen_errors()
-        elif choice == '11':
+        elif action == "search_logs":
             screen_search_logs()
-        elif choice == '12':
+        elif action == "scraper_log":
             screen_scraper_log()
-        elif choice == '13':
+        elif action == "config_show":
             screen_config()
-        elif choice == '14':
+        elif action == "manage_queries":
             screen_manage_queries()
-        elif choice == '15':
+        elif action == "change_interval":
             screen_change_interval()
-        elif choice == '16':
+        elif action == "killswitch":
             screen_killswitch()
 
 
@@ -188,21 +381,19 @@ def screen_scrape():
     config = Config()
     if not config.TARGET_QUERIES:
         clear()
-        print(f"\n  {C.BRIGHT_RED}No target queries configured. Go to option 14 first.{C.RESET}")
+        print(f"\n  {C.BRIGHT_RED}No target queries configured.{C.RESET}")
         wait()
         return
 
-    query = config.TARGET_QUERIES[0]
-    run_scrape(query, decoy=False)
+    run_scrape(config.TARGET_QUERIES[0], decoy=False)
 
 
 def screen_scrape_custom():
     clear()
     print(f"{C.BOLD}{'Custom Scrape':^60}")
     print(f"{C.DIM}{'─'*60}{C.RESET}\n")
-    query = input(f"  Enter search query: ").strip()
+    query = input_text("  Enter search query: ")
     if not query:
-        wait()
         return
     run_scrape(query, decoy=False)
 
@@ -215,8 +406,7 @@ def screen_scrape_with_decoy():
         wait()
         return
 
-    query = config.TARGET_QUERIES[0]
-    run_scrape(query, decoy=True)
+    run_scrape(config.TARGET_QUERIES[0], decoy=True)
 
 
 def run_scrape(query, decoy=False):
@@ -234,15 +424,13 @@ def run_scrape(query, decoy=False):
     config = Config()
     timing = HumanTiming()
 
-    # Decoy scrape first
     if decoy and config.DECOY_QUERIES:
         decoy_query = config.get_random_decoy_query()
         print(f"  {C.DIM}[decoy]{C.RESET} Scraping: {C.CYAN}{decoy_query}{C.RESET}")
-        count = _run_scrapy(decoy_query)
+        _run_scrapy(decoy_query)
         print(f"  {C.DIM}Delaying (human-like pause)...{C.RESET}\n")
         timing.between_searches()
 
-    # Main scrape
     print(f"  {C.BOLD}[target]{C.RESET} Scraping: {C.BRIGHT_GREEN}{query}{C.RESET}")
     start = time.time()
     products = _run_scrapy(query)
@@ -291,12 +479,16 @@ def screen_monitor():
     print(f"{C.DIM}{'─'*60}{C.RESET}")
     print()
 
-    choice = input(f"  Start now? ({C.BOLD}Y{C.RESET}/n): ").strip().lower()
-    if choice == 'n':
+    items = [
+        MenuItem("Start monitoring now", action="start"),
+        MenuItem("Cancel", action="cancel"),
+    ]
+    action = run_menu("Continuous Monitoring", items)
+
+    if action != "start":
         return
 
     print(f"\n  {C.DIM}Press Ctrl+C to stop monitoring{C.RESET}\n")
-
     try:
         from orchestrator import AmazonMonitorOrchestrator
         monitor = AmazonMonitorOrchestrator(config)
@@ -310,53 +502,34 @@ def screen_monitor():
 
 def screen_analyze():
     config = Config()
-
-    # Show available ASINs from stats
-    clear()
-    print(f"{C.BOLD}{'AI Price Analysis':^60}")
-    print(f"{C.DIM}{'─'*60}{C.RESET}\n")
+    items = []
+    all_asins = []
 
     if stats_tracker.products:
-        print(f"  {C.BOLD}Tracked ASINs:{C.RESET}")
-        for i, (asin, prod) in enumerate(stats_tracker.products.items(), 1):
-            print(f"    {i}. {C.CYAN}{asin}{C.RESET}  (last: ₹{prod.current_price})")
-        print()
+        for asin, prod in stats_tracker.products.items():
+            items.append(MenuItem(f"{asin}  (last: ₹{prod.current_price})", action=asin))
+            all_asins.append(asin)
 
     if config.MONITORED_ASINS:
-        print(f"  {C.BOLD}Monitored ASINs (from config):{C.RESET}")
-        for i, asin in enumerate(config.MONITORED_ASINS, len(stats_tracker.products) + 1):
-            print(f"    {i}. {C.CYAN}{asin}{C.RESET}")
-        print()
+        for asin in config.MONITORED_ASINS:
+            if asin not in all_asins:
+                items.append(MenuItem(f"{asin}  (monitored)", action=asin))
+                all_asins.append(asin)
 
-    print(f"    {C.BOLD}C{C.RESET}. Custom ASIN")
-    print()
+    items.append(MenuItem("Enter custom ASIN", action="__custom__"))
+    items.append(MenuItem("Cancel", action=None))
 
-    choice = input(f"  Select ASIN: ").strip()
+    action = run_menu("AI Price Analysis", items)
 
-    if not choice:
-        wait()
+    if action is None:
         return
 
-    if choice.upper() == 'C':
-        asin = input(f"  Enter ASIN: ").strip()
-    else:
-        try:
-            idx = int(choice) - 1
-            all_asins = list(stats_tracker.products.keys()) + config.MONITORED_ASINS
-            if 0 <= idx < len(all_asins):
-                asin = all_asins[idx]
-            else:
-                print(f"  {C.BRIGHT_RED}Invalid selection{C.RESET}")
-                wait()
-                return
-        except ValueError:
-            print(f"  {C.BRIGHT_RED}Invalid input{C.RESET}")
-            wait()
+    if action == "__custom__":
+        asin = input_text("  Enter ASIN: ")
+        if not asin:
             return
-
-    if not asin:
-        wait()
-        return
+    else:
+        asin = action
 
     print(f"\n  {C.DIM}Running analysis for {asin}...{C.RESET}\n")
     activity_logger.log_session_start(f"analysis-{asin}")
@@ -394,66 +567,73 @@ def screen_analyze():
 
 def screen_status():
     clear()
-    print(f"{C.BOLD}{'Session Status':^60}")
-    print(f"{C.DIM}{'─'*60}{C.RESET}\n")
-
     tracker = stats_tracker
     summary = tracker.get_session_summary()
 
+    lines = []
+    lines.append(f"{C.BOLD}Session Status{C.RESET}")
+    lines.append("")
+
     if not summary.get('session_start'):
-        print(f"  {C.YELLOW}No active session. Run a scrape first.{C.RESET}")
-        wait()
-        return
+        lines.append(f"  {C.YELLOW}No active session. Run a scrape first.{C.RESET}")
+    else:
+        lines.append(f"  Session started : {C.BRIGHT_CYAN}{summary['session_start']}{C.RESET}")
+        lines.append(f"  Elapsed time    : {C.CYAN}{summary['elapsed_time']}{C.RESET}")
+        lines.append(f"  Queries run     : {C.BOLD}{summary['queries']['run']}{C.RESET}")
+        lines.append("")
+        lines.append(f"  Products scraped : {C.BRIGHT_GREEN}{summary['products']['scraped']}{C.RESET}")
+        lines.append(f"  Products failed  : {C.BRIGHT_RED}{summary['products']['failed']}{C.RESET}")
+        lines.append(f"  Price changes    : {C.BRIGHT_YELLOW}{summary['activities']['price_changes']}{C.RESET}")
+        lines.append(f"  Analyses run     : {C.BRIGHT_MAGENTA}{summary['activities']['analyses']}{C.RESET}")
+        lines.append(f"  Errors           : {C.BRIGHT_RED}{summary['activities']['errors']}{C.RESET}")
 
-    print(f"  Session started : {C.BRIGHT_CYAN}{summary['session_start']}{C.RESET}")
-    print(f"  Elapsed time    : {C.CYAN}{summary['elapsed_time']}{C.RESET}")
-    print(f"  Queries run     : {C.BOLD}{summary['queries']['run']}{C.RESET}")
-    print()
-    print(f"  Products scraped : {C.BRIGHT_GREEN}{summary['products']['scraped']}{C.RESET}")
-    print(f"  Products failed  : {C.BRIGHT_RED}{summary['products']['failed']}{C.RESET}")
-    print(f"  Price changes    : {C.BRIGHT_YELLOW}{summary['activities']['price_changes']}{C.RESET}")
-    print(f"  Analyses run     : {C.BRIGHT_MAGENTA}{summary['activities']['analyses']}{C.RESET}")
-    print(f"  Errors           : {C.BRIGHT_RED}{summary['activities']['errors']}{C.RESET}")
-    print()
+        if tracker.products:
+            lines.append("")
+            lines.append(f"  {C.BOLD}Products{C.RESET}")
+            lines.append(f"  {'─'*58}")
+            lines.append(f"  {'ASIN':<15} {'Price':<10} {'Low':<10} {'High':<10} {'Changes':<8} {'Status'}")
+            lines.append(f"  {'─'*58}")
+            for asin, prod in tracker.products.items():
+                sc = C.GREEN if prod.status == 'scraped' else C.RED if prod.status == 'error' else C.YELLOW
+                lines.append(f"  {C.CYAN}{asin:<15}{C.RESET} {C.GREEN}₹{prod.current_price:<9}{C.RESET} {C.GREEN}₹{prod.lowest_price:<9}{C.RESET} {C.YELLOW}₹{prod.highest_price:<9}{C.RESET} {prod.price_changes:<8} {sc}{prod.status}{C.RESET}")
 
-    if tracker.products:
-        print(f"  {C.BOLD}Products{C.RESET}")
-        print(f"  {'─'*58}")
-        print(f"  {'ASIN':<15} {'Price':<10} {'Low':<10} {'High':<10} {'Changes':<8} {'Status'}")
-        print(f"  {'─'*58}")
-        for asin, prod in tracker.products.items():
-            sc = C.GREEN if prod.status == 'scraped' else C.RED if prod.status == 'error' else C.YELLOW
-            print(f"  {C.CYAN}{asin:<15}{C.RESET} {C.GREEN}₹{prod.current_price:<9}{C.RESET} {C.GREEN}₹{prod.lowest_price:<9}{C.RESET} {C.YELLOW}₹{prod.highest_price:<9}{C.RESET} {prod.price_changes:<8} {sc}{prod.status}{C.RESET}")
-        print()
+            progress = tracker.get_progress_percentage()
+            bar_len = 40
+            filled = int(bar_len * progress / 100) if tracker.session.products_total else 0
+            bar = f"{C.GREEN}{'█'*filled}{C.RESET}{'░'*(bar_len-filled)}"
+            lines.append("")
+            lines.append(f"  Progress: [{bar}] {progress:.1f}%")
 
-    progress = tracker.get_progress_percentage()
-    bar_len = 40
-    filled = int(bar_len * progress / 100) if tracker.session.products_total else 0
-    bar = f"{C.GREEN}{'█'*filled}{C.RESET}{'░'*(bar_len-filled)}"
-    print(f"  Progress: [{bar}] {progress:.1f}%")
-    wait()
+    lines.append("")
+    lines.append(f"  {C.DIM}Press any key to go back{C.RESET}")
+
+    _show_text_lines(lines)
 
 
 # ==================== Screen: Price Alerts ====================
 
 def screen_price_alerts():
     clear()
-    print(f"{C.BOLD}{'Price Change Alerts':^60}")
-    print(f"{C.DIM}{'─'*60}{C.RESET}\n")
-
     alerts = stats_tracker.get_price_alerts()
+
+    lines = []
+    lines.append(f"{C.BOLD}Price Change Alerts{C.RESET}")
+    lines.append("")
+
     if not alerts:
-        print(f"  {C.YELLOW}No price changes detected yet.{C.RESET}")
+        lines.append(f"  {C.YELLOW}No price changes detected yet.{C.RESET}")
     else:
-        for i, a in enumerate(alerts, 1):
-            print(f"  {C.BOLD}{i}.{C.RESET} {C.CYAN}{a['asin']}{C.RESET}")
-            print(f"     Title   : {a['title'][:50]}")
-            print(f"     Current : {C.GREEN}₹{a['current_price']}{C.RESET}")
-            print(f"     Range   : {C.GREEN}₹{a['lowest_price']}{C.RESET} - {C.YELLOW}₹{a['highest_price']}{C.RESET}")
-            print(f"     Changes : {C.BOLD}{a['changes']}{C.RESET}")
-            print(f"     Updated : {a['last_updated']}")
-            print()
-    wait()
+        for a in alerts:
+            lines.append(f"  {C.BOLD}●{C.RESET} {C.CYAN}{a['asin']}{C.RESET}")
+            lines.append(f"     Title   : {a['title'][:50]}")
+            lines.append(f"     Current : {C.GREEN}₹{a['current_price']}{C.RESET}")
+            lines.append(f"     Range   : {C.GREEN}₹{a['lowest_price']}{C.RESET} - {C.YELLOW}₹{a['highest_price']}{C.RESET}")
+            lines.append(f"     Changes : {C.BOLD}{a['changes']}{C.RESET}")
+            lines.append(f"     Updated : {a['last_updated']}")
+            lines.append("")
+
+    lines.append(f"  {C.DIM}Press any key to go back{C.RESET}")
+    _show_text_lines(lines)
 
 
 # ==================== Screen: Report ====================
@@ -471,41 +651,36 @@ def screen_report():
     tracker.export_report(filename)
 
     summary = tracker.get_session_summary()
-    print(f"{C.BOLD}{'Session Report':^60}")
-    print(f"{C.DIM}{'─'*60}{C.RESET}\n")
-    print(f"  Session  : {C.BRIGHT_CYAN}{summary['session_start']}{C.RESET}")
-    print(f"  Elapsed  : {C.CYAN}{summary['elapsed_time']}{C.RESET}")
-    print(f"  Scraped  : {C.BRIGHT_GREEN}{summary['products']['scraped']}{C.RESET}")
-    print(f"  Failed   : {C.BRIGHT_RED}{summary['products']['failed']}{C.RESET}")
-    print(f"  Changes  : {C.BRIGHT_YELLOW}{summary['activities']['price_changes']}{C.RESET}")
-    print(f"  Errors   : {C.BRIGHT_RED}{summary['activities']['errors']}{C.RESET}")
-    print()
-    print(f"  {C.BRIGHT_GREEN}✓{C.RESET} Saved to {C.BOLD}{filename}{C.RESET}")
-    wait()
+    lines = []
+    lines.append(f"{C.BOLD}Session Report Exported{C.RESET}")
+    lines.append("")
+    lines.append(f"  Session  : {C.BRIGHT_CYAN}{summary['session_start']}{C.RESET}")
+    lines.append(f"  Elapsed  : {C.CYAN}{summary['elapsed_time']}{C.RESET}")
+    lines.append(f"  Scraped  : {C.BRIGHT_GREEN}{summary['products']['scraped']}{C.RESET}")
+    lines.append(f"  Failed   : {C.BRIGHT_RED}{summary['products']['failed']}{C.RESET}")
+    lines.append(f"  Changes  : {C.BRIGHT_YELLOW}{summary['activities']['price_changes']}{C.RESET}")
+    lines.append(f"  Errors   : {C.BRIGHT_RED}{summary['activities']['errors']}{C.RESET}")
+    lines.append("")
+    lines.append(f"  {C.BRIGHT_GREEN}✓{C.RESET} Saved to {C.BOLD}{filename}{C.RESET}")
+    lines.append("")
+    lines.append(f"  {C.DIM}Press any key to go back{C.RESET}")
+    _show_text_lines(lines)
 
 
 # ==================== Screen: Logs ====================
 
 def screen_activity_log():
-    viewer = LogViewer()
-    clear()
-    print(f"{C.BOLD}{'Activity Log':^60}")
-    print(f"{C.DIM}{'─'*60}{C.RESET}\n")
-
     types = ['ALL', 'SCRAPE', 'ANALYSIS', 'SCHEDULE', 'ERROR', 'BLOCKED', 'PROXY']
-    for i, t in enumerate(types, 1):
-        print(f"    {C.BOLD}{i}{C.RESET}. {t}")
-    print()
+    items = [MenuItem(t, action=t) for t in types]
+    items.append(MenuItem("Cancel", action=None))
 
-    choice = input(f"  Filter type ({C.BOLD}1{C.RESET}-{len(types)}): ").strip()
-    try:
-        idx = int(choice) - 1
-        filter_type = types[idx] if 0 <= idx < len(types) else None
-        if filter_type == 'ALL':
-            filter_type = None
-    except (ValueError, IndexError):
+    action = run_menu("Activity Log — Select Filter", items)
+    if action is None or action == 'ALL':
         filter_type = None
+    else:
+        filter_type = action
 
+    viewer = LogViewer()
     viewer.view_activity_log(50, filter_type)
     wait()
 
@@ -518,9 +693,8 @@ def screen_errors():
 
 def screen_search_logs():
     clear()
-    query = input(f"  Search logs for: ").strip()
+    query = input_text("  Search logs for: ")
     if not query:
-        wait()
         return
     viewer = LogViewer()
     viewer.search(query)
@@ -537,9 +711,9 @@ def screen_scraper_log():
 
 def screen_config():
     config = Config()
-    clear()
-    print(f"{C.BOLD}{'Configuration':^60}")
-    print(f"{C.DIM}{'─'*60}{C.RESET}\n")
+    lines = []
+    lines.append(f"{C.BOLD}Configuration{C.RESET}")
+    lines.append("")
 
     sections = [
         ('Amazon', [
@@ -555,8 +729,6 @@ def screen_config():
         ('Behavioral', [
             ('Request delay', f"{config.REQUEST_DELAY_MIN}-{config.REQUEST_DELAY_MAX}s"),
             ('Product read', f"{config.READING_TIME_PRODUCT_MIN}-{config.READING_TIME_PRODUCT_MAX}s"),
-            ('Offers read', f"{config.READING_TIME_OFFERS_MIN}-{config.READING_TIME_OFFERS_MAX}s"),
-            ('Between searches', f"{config.BETWEEN_SEARCHES_MIN}-{config.BETWEEN_SEARCHES_MAX}s"),
             ('Hesitation', config.HESITATION_PROBABILITY),
         ]),
         ('Infrastructure', [
@@ -566,104 +738,110 @@ def screen_config():
         ]),
     ]
 
-    for section, items in sections:
-        print(f"  {C.BOLD}{C.BRIGHT_CYAN}{section}{C.RESET}")
-        print(f"  {'─'*50}")
-        for key, val in items:
-            print(f"  {C.DIM}{key:<22}{C.RESET} {val}")
-        print()
+    for section, items_list in sections:
+        lines.append(f"  {C.BOLD}{C.BRIGHT_CYAN}{section}{C.RESET}")
+        lines.append(f"  {'─'*50}")
+        for key, val in items_list:
+            lines.append(f"  {C.DIM}{key:<22}{C.RESET} {val}")
+        lines.append("")
 
-    wait()
+    lines.append(f"  {C.DIM}Press any key to go back{C.RESET}")
+    _show_text_lines(lines)
 
+
+# ==================== Screen: Manage Queries ====================
 
 def screen_manage_queries():
     config = Config()
     while True:
-        clear()
-        print(f"{C.BOLD}{'Manage Queries & ASINs':^60}")
-        print(f"{C.DIM}{'─'*60}{C.RESET}\n")
+        items = []
 
-        print(f"  {C.BOLD}Target Queries:{C.RESET}")
-        for i, q in enumerate(config.TARGET_QUERIES, 1):
-            print(f"    {i}. {C.GREEN}{q}{C.RESET}")
-        print()
+        if config.TARGET_QUERIES:
+            items.append(MenuItem("TARGET QUERIES", color=C.GREEN))
+            for q in config.TARGET_QUERIES:
+                items.append(MenuItem(f"  {q}", action=None, dim=True))
+            items.append(MenuItem("", separator=True))
 
-        print(f"  {C.BOLD}Decoy Queries:{C.RESET}")
-        for i, q in enumerate(config.DECOY_QUERIES, 1):
-            print(f"    {i}. {C.YELLOW}{q}{C.RESET}")
-        print()
+        if config.DECOY_QUERIES:
+            items.append(MenuItem("DECOY QUERIES", color=C.YELLOW))
+            for q in config.DECOY_QUERIES:
+                items.append(MenuItem(f"  {q}", action=None, dim=True))
+            items.append(MenuItem("", separator=True))
 
         if config.MONITORED_ASINS:
-            print(f"  {C.BOLD}Monitored ASINs:{C.RESET}")
-            for i, a in enumerate(config.MONITORED_ASINS, 1):
-                print(f"    {i}. {C.CYAN}{a}{C.RESET}")
-            print()
+            items.append(MenuItem("MONITORED ASINS", color=C.CYAN))
+            for a in config.MONITORED_ASINS:
+                items.append(MenuItem(f"  {a}", action=None, dim=True))
+            items.append(MenuItem("", separator=True))
 
-        print(f"    {C.BOLD}1{C.RESET}. Add target query")
-        print(f"    {C.BOLD}2{C.RESET}. Add decoy query")
-        print(f"    {C.BOLD}3{C.RESET}. Add monitored ASIN")
-        print(f"    {C.BOLD}4{C.RESET}. Remove target query")
-        print(f"    {C.BOLD}5{C.RESET}. Remove decoy query")
-        print(f"    {C.BOLD}6{C.RESET}. Remove monitored ASIN")
-        print(f"    {C.BOLD}0{C.RESET}. Back")
-        print()
+        items.append(MenuItem("Add target query", action="add_target"))
+        items.append(MenuItem("Add decoy query", action="add_decoy"))
+        items.append(MenuItem("Add monitored ASIN", action="add_asin"))
+        items.append(MenuItem("Remove target query", action="remove_target"))
+        items.append(MenuItem("Remove decoy query", action="remove_decoy"))
+        items.append(MenuItem("Remove monitored ASIN", action="remove_asin"))
+        items.append(MenuItem("Back", action="back"))
 
-        choice = input(f"  Select: ").strip()
+        action = run_menu("Manage Queries & ASINs", items)
 
-        if choice == '0':
+        if action in ("back", None):
             break
-        elif choice == '1':
-            val = input(f"  Query to add: ").strip()
+        elif action == "add_target":
+            val = input_text("  Query to add: ")
             if val:
                 _env_edit('TARGET_QUERIES', val)
-                config = Config()  # reload
-        elif choice == '2':
-            val = input(f"  Decoy query to add: ").strip()
+                config = Config()
+        elif action == "add_decoy":
+            val = input_text("  Decoy query to add: ")
             if val:
                 _env_edit('DECOY_QUERIES', val)
                 config = Config()
-        elif choice == '3':
-            val = input(f"  ASIN to add: ").strip()
+        elif action == "add_asin":
+            val = input_text("  ASIN to add: ")
             if val:
                 _env_edit('MONITORED_ASINS', val)
                 config = Config()
-        elif choice in ('4', '5', '6'):
-            key_map = {'4': 'TARGET_QUERIES', '5': 'DECOY_QUERIES', '6': 'MONITORED_ASINS'}
-            key = key_map[choice]
-            vals = config.TARGET_QUERIES if choice == '4' else (config.DECOY_QUERIES if choice == '5' else config.MONITORED_ASINS)
-            if not vals:
-                print(f"  {C.YELLOW}Nothing to remove{C.RESET}")
-                wait()
-                continue
+        elif action == "remove_target":
+            _remove_from_list('TARGET_QUERIES', 'Target Queries', config)
+            config = Config()
+        elif action == "remove_decoy":
+            _remove_from_list('DECOY_QUERIES', 'Decoy Queries', config)
+            config = Config()
+        elif action == "remove_asin":
+            _remove_from_list('MONITORED_ASINS', 'Monitored ASINs', config)
+            config = Config()
 
-            clear()
-            print(f"  {C.BOLD}Select item to remove:{C.RESET}\n")
-            for i, v in enumerate(vals, 1):
-                print(f"    {i}. {v}")
-            print()
 
-            sel = input(f"  Select: ").strip()
-            try:
-                idx = int(sel) - 1
-                if 0 <= idx < len(vals):
-                    _env_remove(key, vals[idx])
-                    config = Config()
-            except ValueError:
-                pass
-        else:
-            wait("Invalid choice")
+def _remove_from_list(key, label, config):
+    vals = getattr(config, key)
+    if not vals:
+        clear()
+        print(f"\n  {C.YELLOW}Nothing to remove.{C.RESET}")
+        wait()
+        return
 
+    items = []
+    for v in vals:
+        items.append(MenuItem(v, action=v))
+    items.append(MenuItem("Cancel", action=None))
+
+    action = run_menu(f"Remove {label}", items)
+    if action:
+        _env_remove(key, action)
+
+
+# ==================== Screen: Change Interval ====================
 
 def screen_change_interval():
     config = Config()
     clear()
     print(f"{C.BOLD}{'Change Scrape Interval':^60}")
-    print(f"{C.DIM}{'─'*60}{C.RESET}\n")
+    print(f"{C.DIM}{'─'*60}{C.RESET}")
     print(f"  Current interval : {C.BRIGHT_CYAN}{config.SCRAPE_INTERVAL_HOURS}h{C.RESET}")
     print(f"  Current jitter   : {C.CYAN}±{config.SCHEDULE_JITTER_MINUTES}m{C.RESET}")
     print()
 
-    val = input(f"  New interval (hours): ").strip()
+    val = input_text("  New interval (hours): ")
     if val:
         try:
             _env_set('SCRAPE_INTERVAL_HOURS', val)
@@ -671,7 +849,7 @@ def screen_change_interval():
         except ValueError:
             print(f"  {C.BRIGHT_RED}Invalid number{C.RESET}")
 
-    val = input(f"  New jitter (minutes, or Enter to keep): ").strip()
+    val = input_text("  New jitter (minutes): ")
     if val:
         try:
             _env_set('SCHEDULE_JITTER_MINUTES', val)
@@ -685,7 +863,6 @@ def screen_change_interval():
 # ==================== Screen: Kill Switch ====================
 
 def _count_running_processes():
-    """Count running scrape-related processes"""
     try:
         if os.name == 'nt':
             result = subprocess.run(
@@ -705,7 +882,6 @@ def _count_running_processes():
 
 
 def _list_scrape_processes():
-    """List running scrape processes with PIDs"""
     processes = []
     try:
         if os.name == 'nt':
@@ -721,105 +897,73 @@ def _list_scrape_processes():
                         pid = line.split('=', 1)[1].strip()
                     elif line.startswith('CommandLine='):
                         cmdline = line.split('=', 1)[1].strip()
-
-                if pid and ('scrapy' in cmdline.lower() or 'amazon' in cmdline.lower() or 'orchestrator' in cmdline.lower() or 'cli.py' in cmdline.lower()):
+                if pid and any(kw in cmdline.lower() for kw in ['scrapy', 'amazon', 'orchestrator', 'cli.py', 'monitor']):
                     processes.append((pid, cmdline))
-        else:
-            result = subprocess.run(
-                ['ps', 'aux'],
-                capture_output=True, text=True, timeout=10
-            )
-            for line in result.stdout.split('\n'):
-                if any(kw in line.lower() for kw in ['scrapy', 'orchestrator', 'amazon']):
-                    parts = line.split()
-                    if len(parts) > 1:
-                        processes.append((parts[1], ' '.join(parts[10:])))
     except Exception:
         pass
     return processes
 
 
 def screen_killswitch():
-    """Kill switch screen - shows running processes and lets you kill them"""
-    while True:
+    processes = _list_scrape_processes()
+    count = _count_running_processes()
+
+    if not processes and count == 0:
         clear()
-        print(f"{C.BOLD}{'Kill Switch':^60}")
-        print(f"{C.DIM}{'─'*60}{C.RESET}\n")
+        print(f"\n  {C.BRIGHT_GREEN}✓{C.RESET} No scrape processes running.")
+        wait()
+        return
 
-        processes = _list_scrape_processes()
-        count = _count_running_processes()
+    items = []
+    items.append(MenuItem(f"Kill ALL processes ({len(processes) or count})", action="kill_all", color=C.BRIGHT_RED))
 
-        if not processes and count == 0:
-            print(f"  {C.BRIGHT_GREEN}✓{C.RESET} No scrape processes running.")
-            print()
-            wait()
-            return
+    if processes:
+        items.append(MenuItem("", separator=True))
+        for pid, cmdline in processes:
+            short = cmdline[:50] + '...' if len(cmdline) > 50 else cmdline
+            items.append(MenuItem(f"PID {pid}  {short}", action=f"kill_{pid}"))
 
-        print(f"  {C.BRIGHT_RED}{len(processes) or count} process(es) found:{C.RESET}\n")
+    items.append(MenuItem("", separator=True))
+    items.append(MenuItem("Back", action="back"))
 
-        for i, (pid, cmdline) in enumerate(processes, 1):
-            # Truncate long command lines
-            if len(cmdline) > 55:
-                cmdline = cmdline[:52] + '...'
-            print(f"  {C.BOLD}{i}.{C.RESET} PID: {C.BRIGHT_RED}{pid:<8}{C.RESET} {C.DIM}{cmdline}{C.RESET}")
+    while True:
+        action = run_menu("Kill Switch", items)
 
-        if not processes:
-            print(f"  {C.DIM}(Processes detected but details unavailable){C.RESET}")
-            print()
-
-        print()
-        print(f"  {C.BOLD}1{C.RESET}. Kill {C.BRIGHT_RED}all{C.RESET} scrape processes")
-        if processes:
-            print(f"  {C.BOLD}2{C.RESET}. Kill specific process (by number)")
-        print(f"  {C.BOLD}0{C.RESET}. Back")
-        print()
-
-        choice = input(f"  {C.BRIGHT_CYAN}Select{C.RESET}: ").strip()
-
-        if choice == '0':
+        if action in ("back", None):
             break
-        elif choice == '1':
+        elif action == "kill_all":
             if processes:
                 for pid, _ in processes:
                     _kill_process(pid)
             else:
-                # Kill all python processes related to scraper
                 _kill_all_python_scrapers()
-            print(f"  {C.BRIGHT_GREEN}✓{C.RESET} All scrape processes killed.")
+            clear()
+            print(f"\n  {C.BRIGHT_GREEN}✓{C.RESET} All scrape processes killed.")
             wait()
             break
-        elif choice == '2' and processes:
-            sel = input(f"  Process number: ").strip()
-            try:
-                idx = int(sel) - 1
-                if 0 <= idx < len(processes):
-                    pid, cmdline = processes[idx]
-                    print(f"  Killing PID {C.BRIGHT_RED}{pid}{C.RESET}...")
-                    _kill_process(pid)
-                    print(f"  {C.BRIGHT_GREEN}✓{C.RESET} Process killed.")
-                    wait()
-            except ValueError:
-                pass
+        elif action and action.startswith("kill_"):
+            pid = action[5:]
+            clear()
+            print(f"  Killing PID {C.BRIGHT_RED}{pid}{C.RESET}...")
+            _kill_process(pid)
+            print(f"  {C.BRIGHT_GREEN}✓{C.RESET} Process killed.")
+            wait()
+            break
 
 
 def _kill_process(pid):
-    """Kill a process by PID"""
     try:
         if os.name == 'nt':
-            subprocess.run(['taskkill', '/F', '/PID', str(pid)],
-                         capture_output=True, timeout=5)
+            subprocess.run(['taskkill', '/F', '/PID', str(pid)], capture_output=True, timeout=5)
         else:
-            subprocess.run(['kill', '-9', str(pid)],
-                         capture_output=True, timeout=5)
+            subprocess.run(['kill', '-9', str(pid)], capture_output=True, timeout=5)
     except Exception:
         pass
 
 
 def _kill_all_python_scrapers():
-    """Kill all python processes with scrapy/monitor keywords"""
     try:
         if os.name == 'nt':
-            # Kill scrapy processes
             subprocess.run(
                 ['wmic', 'process', 'where',
                  "name='python.exe' and (CommandLine like '%scrapy%' or CommandLine like '%orchestrator%')",
@@ -827,15 +971,85 @@ def _kill_all_python_scrapers():
                 capture_output=True, timeout=10
             )
         else:
-            subprocess.run(
-                ['pkill', '-9', '-f', 'scrapy'],
-                capture_output=True, timeout=5
-            )
+            subprocess.run(['pkill', '-9', '-f', 'scrapy'], capture_output=True, timeout=5)
     except Exception:
         pass
 
 
-# ==================== Helpers ====================
+# ==================== Input Helpers ====================
+
+def input_text(prompt=""):
+    """Read text input with visible cursor and proper terminal mode"""
+    if os.name == 'nt':
+        try:
+            return input(prompt)
+        except (EOFError, KeyboardInterrupt):
+            return ""
+    else:
+        # Unix: temporarily restore cooked mode
+        import tty
+        import termios
+        fd = sys.stdin.fileno()
+        old = termios.tcgetattr(fd)
+        try:
+            tty.setcbreak(fd)
+            sys.stdout.write(prompt)
+            sys.stdout.flush()
+            buf = []
+            while True:
+                ch = sys.stdin.read(1)
+                if ch in ('\r', '\n'):
+                    sys.stdout.write('\n')
+                    sys.stdout.flush()
+                    break
+                elif ch == '\x7f' or ch == '\x08':
+                    if buf:
+                        buf.pop()
+                        sys.stdout.write('\b \b')
+                        sys.stdout.flush()
+                elif ch == '\x1b':
+                    # Esc — cancel
+                    sys.stdout.write('\n')
+                    sys.stdout.flush()
+                    return ""
+                else:
+                    buf.append(ch)
+                    sys.stdout.write(ch)
+                    sys.stdout.flush()
+            return ''.join(buf)
+        except Exception:
+            return ""
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old)
+
+
+def wait(prompt="Press Enter to continue..."):
+    try:
+        input(f"\n  {C.DIM}{prompt}{C.RESET}")
+    except (EOFError, KeyboardInterrupt):
+        pass
+
+
+def _show_text_lines(lines):
+    """Display a list of text lines and wait for keypress"""
+    for line in lines:
+        print(line)
+
+
+def clear():
+    os.system('cls' if os.name == 'nt' else 'clear')
+
+
+def format_duration(seconds):
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    if h: return f"{h}h {m}m {s}s"
+    if m: return f"{m}m {s}s"
+    return f"{s}s"
+
+
+# ==================== Helpers: .env editing ====================
 
 def _env_edit(key, value):
     env_file = Path('.env')
@@ -917,30 +1131,20 @@ def _env_set(key, value):
     env_file.write_text('\n'.join(new_lines) + '\n')
 
 
-def format_duration(seconds):
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    if h: return f"{h}h {m}m {s}s"
-    if m: return f"{m}m {s}s"
-    return f"{s}s"
-
-
 # ==================== Entry Point ====================
 
 def main():
-    if '--quick' in sys.argv or '-q' in sys.argv:
-        print("Usage:")
-        print("  python cli.py              Open interactive menu")
-        print("  python cli.py --quick      Show this help")
-        print()
-        return
-
     try:
         show_main_menu()
     except KeyboardInterrupt:
         clear()
         print(f"\n  {C.DIM}Goodbye! 👋{C.RESET}\n")
+    except Exception as e:
+        clear()
+        print(f"\n  {C.BRIGHT_RED}Error: {e}{C.RESET}")
+        import traceback
+        traceback.print_exc()
+        print()
 
 
 if __name__ == '__main__':
